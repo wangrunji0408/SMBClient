@@ -79,7 +79,10 @@ public class Session {
 
     let response = try await send(request)
 
-    signingRequired = response.securityMode.contains(.signingRequired) || (securityMode.contains(.signingRequired) && response.securityMode.contains(.signingEnabled))
+    signingRequired =
+      response.securityMode.contains(.signingRequired)
+      || (securityMode.contains(.signingRequired)
+        && response.securityMode.contains(.signingEnabled))
 
     maxTransactSize = response.maxTransactSize
     maxReadSize = response.maxReadSize
@@ -186,7 +189,7 @@ public class Session {
     try await session.close(fileId: createResponse.fileId)
 
     return shares.compactMap {
-      var type = Share.ShareType(rawValue: $0.type & 0x0FFFFFFF)
+      var type = Share.ShareType(rawValue: $0.type & 0x0FFF_FFFF)
 
       if $0.type & Share.ShareType.special.rawValue != 0 {
         type.insert(.special)
@@ -281,7 +284,9 @@ public class Session {
   }
 
   @discardableResult
-  public func write(data: Data, fileId: Data, offset: UInt64, length: UInt32) async throws -> Write.Response {
+  public func write(data: Data, fileId: Data, offset: UInt64, length: UInt32) async throws
+    -> Write.Response
+  {
     let writeSize = min(length, maxWriteSize)
     let creditSize = creditSize(size: writeSize)
 
@@ -310,7 +315,9 @@ public class Session {
     return try await send(request)
   }
 
-  public func queryDirectory(path: String, pattern: String) async throws -> [FileDirectoryInformation] {
+  public func queryDirectory(path: String, pattern: String) async throws
+    -> [FileDirectoryInformation]
+  {
     let createRequest = Create.Request(
       messageId: messageId.next(),
       treeId: treeId,
@@ -323,7 +330,7 @@ public class Session {
       name: path
     )
 
-    let outputBufferLength = min(1048576, maxTransactSize)
+    let outputBufferLength = min(1_048_576, maxTransactSize)
     let creditSize = creditSize(size: outputBufferLength)
     let fileInformationClass = QueryDirectory.FileInformationClass.fileDirectoryInformation
 
@@ -339,7 +346,8 @@ public class Session {
       outputBufferLength: outputBufferLength
     )
 
-    let (createResponse, queryDirectoryResponse) = try await send(createRequest, queryDirectoryRequest)
+    let (createResponse, queryDirectoryResponse) = try await send(
+      createRequest, queryDirectoryRequest)
 
     var files: [FileDirectoryInformation] = queryDirectoryResponse.files()
 
@@ -425,7 +433,9 @@ public class Session {
     }
   }
 
-  public func queryInfo(path: String, infoType: InfoType = .file, fileInfoClass: FileInfoClass = .fileAllInformation) async throws -> QueryInfo.Response {
+  public func queryInfo(
+    path: String, infoType: InfoType = .file, fileInfoClass: FileInfoClass = .fileAllInformation
+  ) async throws -> QueryInfo.Response {
     let createRequest = Create.Request(
       messageId: messageId.next(),
       treeId: treeId,
@@ -701,14 +711,18 @@ public class Session {
     return response
   }
 
-  private func send<R1: Message.Request, R2: Message.Request>(_ m1: R1, _ m2: R2) async throws -> (R1.Response, R2.Response) {
+  private func send<R1: Message.Request, R2: Message.Request>(_ m1: R1, _ m2: R2) async throws -> (
+    R1.Response, R2.Response
+  ) {
     let data = try await send(m1.encoded(), m2.encoded())
     let r1 = R1.Response(data: data)
     let r2 = R2.Response(data: Data(data[r1.header.nextCommand...]))
     return (r1, r2)
   }
 
-  private func send<R1: Message.Request, R2: Message.Request, R3: Message.Request>(_ m1: R1, _ m2: R2, _ m3: R3) async throws -> (R1.Response, R2.Response, R3.Response) {
+  private func send<R1: Message.Request, R2: Message.Request, R3: Message.Request>(
+    _ m1: R1, _ m2: R2, _ m3: R3
+  ) async throws -> (R1.Response, R2.Response, R3.Response) {
     let data = try await send(m1.encoded(), m2.encoded(), m3.encoded())
     let r1 = R1.Response(data: data)
     let r2 = R2.Response(data: Data(data[r1.header.nextCommand...]))
@@ -753,12 +767,15 @@ public class Session {
 }
 
 private class SequenceNumber<I: UnsignedInteger & FixedWidthInteger> {
-  var current: I = 0
+  private var current: I = 0
+  private let queue = DispatchQueue(label: "sequence.number.queue")
 
   func next(count: I = 1) -> I {
-    let next = current
-    current &+= count
-    return next
+    return queue.sync {
+      let next = current
+      current &+= count
+      return next
+    }
   }
 }
 

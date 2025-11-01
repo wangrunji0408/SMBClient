@@ -6,7 +6,6 @@ public class Connection {
   var onDisconnected: (Error) -> Void
 
   private let connection: NWConnection
-  private var buffer = Data()
 
   // Track pending requests by message ID
   private var pendingRequests: [UInt64: CheckedContinuation<Data, Error>] = [:]
@@ -133,13 +132,12 @@ public class Connection {
     }
   }
 
-  // Async wrapper for NWConnection.receive
-  private func receiveData(minimumLength: Int = 0, maximumLength: Int = 65536) async throws -> Data
-  {
+  // Receive exactly byteCount bytes
+  private func receiveExact(_ byteCount: Int) async throws -> Data {
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
       connection.receive(
-        minimumIncompleteLength: minimumLength,
-        maximumLength: maximumLength
+        minimumIncompleteLength: byteCount,
+        maximumLength: byteCount
       ) { (data, _, isComplete, error) in
         if let error = error {
           continuation.resume(throwing: error)
@@ -155,19 +153,6 @@ public class Connection {
         continuation.resume(returning: data)
       }
     }
-  }
-
-  // Receive exactly byteCount bytes
-  private func receiveExact(_ byteCount: Int) async throws -> Data {
-    if buffer.count < byteCount {
-      let data = try await receiveData(minimumLength: byteCount - buffer.count)
-      buffer.append(data)
-      assert(buffer.count >= byteCount, "Buffer should have enough data after receiving")
-    }
-
-    let data = Data(buffer.prefix(byteCount))
-    buffer = Data(buffer.suffix(from: byteCount))
-    return data
   }
 
   private func receiveLoop() async {

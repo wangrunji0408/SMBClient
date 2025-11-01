@@ -186,10 +186,17 @@ public class Connection {
     // print("Received SMB response for message ID: \(messageId), status: 0x\(String(header.status, radix: 16))")
 
     // Check if this is a pending response
-    if NTStatus(header.status) == .pending {
-      return
+    switch NTStatus(header.status) {
+    case .success,
+      .moreProcessingRequired,
+      .noMoreFiles,
+      .endOfFile:
+      dispatchResponse(messageId: messageId, result: .success(messageData))
+    case .pending:
+      break
+    default:
+      dispatchResponse(messageId: messageId, result: .failure(ErrorResponse(data: messageData)))
     }
-    dispatchResponse(messageId: messageId, result: .success(messageData))
   }
 
   private func dispatchResponse(messageId: UInt64, result: Result<Data, Error>) {

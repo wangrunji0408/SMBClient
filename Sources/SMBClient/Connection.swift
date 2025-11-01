@@ -8,23 +8,18 @@ public class Connection {
   private let connection: NWConnection
   private var buffer = Data()
 
-  private let semaphore = Semaphore(value: 1)
+  // Track pending requests by message ID
+  private var pendingRequests: [UInt64: CheckedContinuation<Data, Error>] = [:]
+  private let requestsLock = NSLock()
+
+  // Flag to track if receive loop is running
+  private var isReceiving = false
 
   public var state: NWConnection.State {
     connection.state
   }
 
-  public init(host: String) {
-    self.host = host
-    let endpoint = NWEndpoint.hostPort(
-      host: NWEndpoint.Host(host),
-      port: NWEndpoint.Port(integerLiteral: 445)
-    )
-    connection = NWConnection(to: endpoint, using: .tcp)
-    onDisconnected = { _ in }
-  }
-
-  public init(host: String, port: Int) {
+  public init(host: String, port: Int = 445) {
     self.host = host
     let endpoint = NWEndpoint.hostPort(
       host: NWEndpoint.Host(host),
@@ -35,7 +30,7 @@ public class Connection {
   }
 
   public func connect() async throws {
-    return try await withCheckedThrowingContinuation { (continuation) in
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
       connection.stateUpdateHandler = { (state) in
         switch state {
         case .setup, .preparing:
@@ -46,6 +41,8 @@ public class Connection {
         case .ready:
           continuation.resume()
           self.connection.stateUpdateHandler = stateUpdateHandler
+          // Start continuous receive loop
+          self.startReceiveLoop()
         case .failed(let error):
           continuation.resume(throwing: error)
           self.connection.stateUpdateHandler = nil
@@ -78,9 +75,6 @@ public class Connection {
   }
 
   public func send(_ data: Data) async throws -> Data {
-    await semaphore.wait()
-    defer { Task { await semaphore.signal() } }
-
     switch connection.state {
     case .setup:
       try await connect()
@@ -88,160 +82,152 @@ public class Connection {
       onDisconnected(error)
       throw error
     case .preparing, .ready:
-      break
+      // Ensure receive loop is running
+      startReceiveLoop()
     case .cancelled:
       throw ConnectionError.cancelled
     @unknown default:
       throw ConnectionError.unknown
     }
 
+    // Extract message ID from the SMB2 header
+    let reader = ByteReader(data)
+    let header: Header = reader.read()
+    let messageId = header.messageId
+
     let transportPacket = DirectTCPPacket(smb2Message: data)
     let content = transportPacket.encoded()
 
     return try await withCheckedThrowingContinuation { (continuation) in
-      connection.send(content: content, completion: .contentProcessed() { (error) in
-        if let error {
+      // Register the pending request
+      requestsLock.lock()
+      pendingRequests[messageId] = continuation
+      requestsLock.unlock()
+
+      connection.send(
+        content: content,
+        completion: .contentProcessed { (error) in
+          if let error {
+            // Remove pending request and resume with error
+            self.requestsLock.lock()
+            let cont = self.pendingRequests.removeValue(forKey: messageId)
+            self.requestsLock.unlock()
+            cont?.resume(throwing: error)
+          }
+          // If send succeeds, the response will be handled by the receive loop
+        })
+    }
+  }
+
+  private func startReceiveLoop() {
+    requestsLock.lock()
+    guard !isReceiving else {
+      requestsLock.unlock()
+      return
+    }
+    isReceiving = true
+    requestsLock.unlock()
+
+    Task {
+      await receiveLoop()
+    }
+  }
+
+  // Async wrapper for NWConnection.receive - writes data directly to buffer
+  private func receiveData(minimumLength: Int = 0, maximumLength: Int = 65536) async throws {
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+      connection.receive(
+        minimumIncompleteLength: minimumLength,
+        maximumLength: maximumLength
+      ) { (data, _, isComplete, error) in
+        if let error = error {
           continuation.resume(throwing: error)
           return
         }
 
-        self.receive() { (result) in
-          switch result {
-          case .success(let data):
-            continuation.resume(returning: data)
-          case .failure(let error):
-            continuation.resume(throwing: error)
-          }
-        }
-      })
-    }
-  }
-
-  private func receive(completion: @escaping (Result<Data, Error>) -> Void) {
-    let minimumIncompleteLength = 0
-    let maximumLength = 65536
-
-    connection.receive(
-      minimumIncompleteLength: minimumIncompleteLength,
-      maximumLength: maximumLength)
-    { (content, contentContext, isComplete, error) in
-      if let error = error {
-        completion(.failure(error))
-        return
-      }
-
-      guard let content else {
-        if isComplete {
-          completion(.failure(ConnectionError.disconnected))
-        } else {
-          completion(.failure(ConnectionError.noData))
-        }
-        return
-      }
-
-      let transportPacket = DirectTCPPacket(response: content)
-      let length = Int(transportPacket.protocolLength)
-
-      self.buffer.append(Data(transportPacket.smb2Message))
-
-      self.receive(upTo: length) { (result) in
-        switch result {
-        case .success:
-          let data = Data(self.buffer.prefix(length))
-          self.buffer = Data(self.buffer.suffix(from: length))
-
-          let reader = ByteReader(data)
-          var offset = 0
-
-          var header: Header
-          var response = Data()
-          repeat {
-            header = reader.read()
-
-            switch NTStatus(header.status) {
-            case
-              .success,
-              .moreProcessingRequired,
-              .noMoreFiles,
-              .endOfFile:
-              response += data
-            case .pending:
-              if self.buffer.count > 0 {
-                let transportPacket = DirectTCPPacket(response: self.buffer)
-                let length = Int(transportPacket.protocolLength)
-
-                if self.buffer.count < length {
-                  self.receive(completion: completion)
-                  return
-                }
-
-                let data = transportPacket.smb2Message
-                self.buffer = Data(self.buffer.suffix(from: 4 + length))
-
-                let reader = ByteReader(data)
-                let header: Header = reader.read()
-
-                switch NTStatus(header.status) {
-                case
-                  .success,
-                  .moreProcessingRequired,
-                  .noMoreFiles,
-                  .endOfFile:
-                  response += data
-                  break
-                default:
-                  completion(.failure(ErrorResponse(data: data)))
-                  return
-                }
-              } else {
-                self.receive(completion: completion)
-                return
-              }
-            default:
-              completion(.failure(ErrorResponse(data: Data(data[offset...]))))
-              return
-            }
-
-            offset += Int(header.nextCommand)
-            reader.seek(to: offset)
-          } while header.nextCommand > 0
-
-          completion(.success(response))
-        case .failure(let error):
-          completion(.failure(error))
-        }
-      }
-    }
-  }
-
-  private func receive(upTo byteCount: Int, completion: @escaping (Result<(), Error>) -> Void) {
-    let minimumIncompleteLength = 0
-    let maximumLength = 65536
-
-    if self.buffer.count < byteCount {
-      self.connection.receive(minimumIncompleteLength: minimumIncompleteLength, maximumLength: maximumLength) { (data, _, isComplete, error) in
-        if let error = error {
-          completion(.failure(error))
-          return
-        }
-
-        guard let data else {
-          if isComplete {
-            completion(.failure(ConnectionError.disconnected))
-          } else {
-            completion(.failure(ConnectionError.noData))
-          }
+        guard let data = data else {
+          let err = isComplete ? ConnectionError.disconnected : ConnectionError.noData
+          continuation.resume(throwing: err)
           return
         }
 
         self.buffer.append(data)
-        self.receive(upTo: byteCount, completion: completion)
+        continuation.resume()
       }
-      return
+    }
+  }
+
+  // Receive exactly byteCount bytes from buffer (reading more from network if needed)
+  private func receiveExact(_ byteCount: Int) async throws -> Data {
+    while buffer.count < byteCount {
+      try await receiveData()
     }
 
-    completion(.success(()))
+    let data = Data(buffer.prefix(byteCount))
+    buffer = Data(buffer.suffix(from: byteCount))
+    return data
   }
+
+  private func receiveLoop() async {
+    while true {
+      do {
+        try await receiveAndProcessNextMessage()
+      } catch {
+        // Connection error, fail all pending requests
+        failAllPendingRequests(with: error)
+        return
+      }
+    }
+  }
+
+  private func receiveAndProcessNextMessage() async throws {
+    // Receive exactly 4 bytes for the transport header
+    let transportHeader = try await receiveExact(4)
+
+    // Manually parse the length from the transport header
+    // DirectTCP header: 1 byte zero + 3 bytes length (big-endian)
+    let length =
+      Int(transportHeader[1]) << 16 | Int(transportHeader[2]) << 8 | Int(transportHeader[3])
+
+    // Receive exactly the SMB message bytes
+    let messageData = try await receiveExact(length)
+
+    let reader = ByteReader(messageData)
+    let header: Header = reader.read()
+    let messageId = header.messageId
+    // print("Received SMB response for message ID: \(messageId)")
+
+    // Process the SMB response
+    dispatchResponse(messageId: messageId, result: .success(messageData))
+  }
+
+  private func dispatchResponse(messageId: UInt64, result: Result<Data, Error>) {
+    requestsLock.lock()
+    let continuation = pendingRequests.removeValue(forKey: messageId)
+    requestsLock.unlock()
+
+    if let continuation = continuation {
+      switch result {
+      case .success(let data):
+        continuation.resume(returning: data)
+      case .failure(let error):
+        continuation.resume(throwing: error)
+      }
+    }
+  }
+
+  private func failAllPendingRequests(with error: Error) {
+    requestsLock.lock()
+    let requests = pendingRequests
+    pendingRequests.removeAll()
+    isReceiving = false
+    requestsLock.unlock()
+
+    for (_, continuation) in requests {
+      continuation.resume(throwing: error)
+    }
+  }
+
 }
 
 public enum ConnectionError: Error {

@@ -273,7 +273,7 @@ extension Share.ShareType: CustomStringConvertible {
   }
 }
 
-public struct File: Hashable {
+public struct File: Hashable, Sendable {
   public let name: String
   public var size: UInt64 { fileStat.size }
   public var isDirectory: Bool { fileStat.isDirectory }
@@ -299,7 +299,7 @@ extension File: CustomStringConvertible {
   }
 }
 
-public struct FileStat: Hashable {
+public struct FileStat: Hashable, Sendable {
   public let size: UInt64
   public let isDirectory: Bool
   public let isHidden: Bool

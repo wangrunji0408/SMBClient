@@ -133,9 +133,10 @@ public class Connection {
     }
   }
 
-  // Async wrapper for NWConnection.receive - writes data directly to buffer
-  private func receiveData(minimumLength: Int = 0, maximumLength: Int = 65536) async throws {
-    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+  // Async wrapper for NWConnection.receive
+  private func receiveData(minimumLength: Int = 0, maximumLength: Int = 65536) async throws -> Data
+  {
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
       connection.receive(
         minimumIncompleteLength: minimumLength,
         maximumLength: maximumLength
@@ -151,16 +152,17 @@ public class Connection {
           return
         }
 
-        self.buffer.append(data)
-        continuation.resume()
+        continuation.resume(returning: data)
       }
     }
   }
 
-  // Receive exactly byteCount bytes from buffer (reading more from network if needed)
+  // Receive exactly byteCount bytes
   private func receiveExact(_ byteCount: Int) async throws -> Data {
-    while buffer.count < byteCount {
-      try await receiveData()
+    if buffer.count < byteCount {
+      let data = try await receiveData(minimumLength: byteCount - buffer.count)
+      buffer.append(data)
+      assert(buffer.count >= byteCount, "Buffer should have enough data after receiving")
     }
 
     let data = Data(buffer.prefix(byteCount))
@@ -192,12 +194,16 @@ public class Connection {
     // Receive exactly the SMB message bytes
     let messageData = try await receiveExact(length)
 
+    guard messageData.count >= 64 else { return }
     let reader = ByteReader(messageData)
     let header: Header = reader.read()
     let messageId = header.messageId
-    // print("Received SMB response for message ID: \(messageId)")
+    // print("Received SMB response for message ID: \(messageId), status: 0x\(String(header.status, radix: 16))")
 
-    // Process the SMB response
+    // Check if this is a pending response
+    if NTStatus(header.status) == .pending {
+      return
+    }
     dispatchResponse(messageId: messageId, result: .success(messageData))
   }
 

@@ -33,6 +33,10 @@ public final class SMBClient: Sendable {
     )
   }
 
+  public func close() async throws {
+    try await session.close()
+  }
+
   public func listShares() async throws -> [Share] {
     let shares = try await session.enumShareAll()
     return shares
@@ -64,7 +68,8 @@ public final class SMBClient: Sendable {
   }
 
   public func createDirectory(path: String) async throws {
-    try await session.createDirectory(path: Pathname.normalize(path.precomposedStringWithCanonicalMapping))
+    try await session.createDirectory(
+      path: Pathname.normalize(path.precomposedStringWithCanonicalMapping))
   }
 
   public func rename(from: String, to: String) async throws {
@@ -72,7 +77,9 @@ public final class SMBClient: Sendable {
   }
 
   public func move(from: String, to: String) async throws {
-    try await session.move(from: Pathname.normalize(from), to: Pathname.normalize(to.precomposedStringWithCanonicalMapping))
+    try await session.move(
+      from: Pathname.normalize(from),
+      to: Pathname.normalize(to.precomposedStringWithCanonicalMapping))
   }
 
   public func deleteDirectory(path: String) async throws {
@@ -105,7 +112,9 @@ public final class SMBClient: Sendable {
     return try await download(path: path, progressHandler: { _ in })
   }
 
-  public func download(path: String, progressHandler: (_ progress: Double) -> Void) async throws -> Data {
+  public func download(path: String, progressHandler: (_ progress: Double) -> Void) async throws
+    -> Data
+  {
     let fileReader = fileReader(path: Pathname.normalize(path))
 
     let data = try await fileReader.download(progressHandler: progressHandler)
@@ -114,10 +123,14 @@ public final class SMBClient: Sendable {
     return data
   }
 
-  public func download(path: String, localPath: URL, overwrite: Bool = false, progressHandler: (_ progress: Double) -> Void = { _ in }) async throws {
+  public func download(
+    path: String, localPath: URL, overwrite: Bool = false,
+    progressHandler: (_ progress: Double) -> Void = { _ in }
+  ) async throws {
     let fileReader = fileReader(path: Pathname.normalize(path))
-    
-    try await fileReader.download(to: localPath, overwrite: overwrite, progressHandler: progressHandler)
+
+    try await fileReader.download(
+      to: localPath, overwrite: overwrite, progressHandler: progressHandler)
     try await fileReader.close()
   }
 
@@ -125,7 +138,9 @@ public final class SMBClient: Sendable {
     try await upload(content: content, path: Pathname.normalize(path), progressHandler: { _ in })
   }
 
-  public func upload(content: Data, path: String, progressHandler: (_ progress: Double) -> Void) async throws {
+  public func upload(content: Data, path: String, progressHandler: (_ progress: Double) -> Void)
+    async throws
+  {
     let fileWriter = fileWriter(path: Pathname.normalize(path))
 
     try await fileWriter.upload(data: content, progressHandler: progressHandler)
@@ -136,7 +151,9 @@ public final class SMBClient: Sendable {
     try await upload(fileHandle: fileHandle, path: path, progressHandler: { _ in })
   }
 
-  public func upload(fileHandle: FileHandle, path: String, progressHandler: (_ progress: Double) -> Void) async throws {
+  public func upload(
+    fileHandle: FileHandle, path: String, progressHandler: (_ progress: Double) -> Void
+  ) async throws {
     let path = Pathname.normalize(path)
     let fileWriter = fileWriter(path: path)
 
@@ -153,7 +170,8 @@ public final class SMBClient: Sendable {
   public func upload(
     localPath: URL,
     remotePath path: String,
-    progressHandler: (_ completedFiles: Int, _ fileBeingTransferred: URL, _ bytesSent: Int64) -> Void
+    progressHandler: (_ completedFiles: Int, _ fileBeingTransferred: URL, _ bytesSent: Int64) ->
+      Void
   ) async throws {
     let fileWriter = fileWriter(path: Pathname.normalize(path))
 
@@ -174,7 +192,8 @@ public final class SMBClient: Sendable {
   }
 
   public func availableSpace() async throws -> UInt64 {
-    let response = try await session.queryInfo(path: "", infoType: .fileSystem, fileInfoClass: .fileFsSizeInformation)
+    let response = try await session.queryInfo(
+      path: "", infoType: .fileSystem, fileInfoClass: .fileFsSizeInformation)
 
     let sizeInformation = FileFsSizeInformation(data: response.buffer)
     let availableAllocationUnits = sizeInformation.availableAllocationUnits
@@ -226,7 +245,7 @@ extension Share.ShareType: CustomStringConvertible {
   public var description: String {
     var type = [String]()
 
-    switch rawValue & 0x0FFFFFFF {
+    switch rawValue & 0x0FFF_FFFF {
     case SType.diskTree:
       type.append("Disk")
     case SType.printQueue:
@@ -245,10 +264,10 @@ extension Share.ShareType: CustomStringConvertible {
       break
     }
 
-    if rawValue & 0x80000000 != 0 {
+    if rawValue & 0x8000_0000 != 0 {
       type.append("Special")
     }
-    if rawValue & 0x40000000 != 0 {
+    if rawValue & 0x4000_0000 != 0 {
       type.append("Temporary")
     }
 
@@ -267,7 +286,7 @@ public struct File: Hashable, Sendable {
   public var creationTime: Date { fileStat.creationTime }
   public var lastAccessTime: Date { fileStat.lastAccessTime }
   public var lastWriteTime: Date { fileStat.lastWriteTime }
-  
+
   private let fileStat: FileStat
 
   init(fileInfo: FileDirectoryInformation) {

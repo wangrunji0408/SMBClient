@@ -128,7 +128,12 @@ public final class Session: Sendable {
     TreeAccessor(session: self, share: share)
   }
 
-  public func disconnect() {
+  public func close() async throws {
+    let request = Logoff.Request(
+      messageId: messageId.next(),
+      sessionId: sessionId
+    )
+    _ = try await send(request)
     connection.disconnect()
   }
 

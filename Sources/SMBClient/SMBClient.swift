@@ -1,45 +1,36 @@
 import Foundation
 
-public class SMBClient {
+public final class SMBClient: Sendable {
   public let host: String
   public let port: Int
   public var share: String? { session.connectedTree }
 
-  public let session: Session
+  let session: Session
 
-  public init(host: String) {
-    self.host = host
-    port = 445
-    session = Session(host: host)
-  }
-
-  public init(host: String, port: Int) {
-    self.host = host
-    self.port = port
-    session = Session(host: host, port: port)
-  }
-
-  @discardableResult
-  public func login(
-    username: String?,
-    password: String?,
+  public init(
+    host: String,
+    port: Int = 445,
+    username: String? = nil,
+    password: String? = nil,
     domain: String? = nil,
     workstation: String? = nil,
+    securityMode: Negotiate.SecurityMode = [.signingEnabled],
+    dialects: [Negotiate.Dialects] = [.smb202, .smb210],
     requireSigning: Bool = false
-  ) async throws -> SessionSetup.Response {
-    try await session.negotiate(securityMode: [requireSigning ? .signingRequired : .signingEnabled])
-    return try await session.sessionSetup(
+  ) async throws {
+    self.host = host
+    self.port = port
+    self.session = try await Session(
+      host: host,
+      port: port,
       username: username,
       password: password,
       domain: domain,
       workstation: workstation,
+      securityMode: securityMode,
+      dialects: dialects,
       requireSigning: requireSigning
     )
-  }
-
-  @discardableResult
-  public func logoff() async throws -> Logoff.Response {
-    try await session.logoff()
   }
 
   public func listShares() async throws -> [Share] {

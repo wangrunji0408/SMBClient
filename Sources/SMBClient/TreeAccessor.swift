@@ -5,7 +5,7 @@ public class TreeAccessor {
   private let session: Session
 
   init(session: Session, share: String) {
-    self.session = session.newSession()
+    self.session = session
     self.share = share
   }
 

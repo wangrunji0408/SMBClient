@@ -4,105 +4,70 @@ import Foundation
   import Synchronization
 #endif
 
-public class Session {
-  private var messageId = makeSequenceNumber()
-  private var sessionId: UInt64 = 0
-  private(set) var treeId: UInt32 = 0
+public final class Session: Sendable {
+  private let messageId: any SequenceNumberProtocol
+  private let sessionId: UInt64
 
-  private var isAnonymous = false
-  private var signingRequired = false
-  private var signingKey: Data?
+  // Mutable state for tree connection
+  // TODO: Refactor to avoid unsafe Sendable
+  nonisolated(unsafe) var treeId: UInt32 = 0
+  public private(set) nonisolated(unsafe) var connectedTree: String? = nil
 
-  public private(set) var maxTransactSize: UInt32 = 0
-  public private(set) var maxReadSize: UInt32 = 0
-  public private(set) var maxWriteSize: UInt32 = 0
+  private let isAnonymous: Bool
+  private let signingRequired: Bool
+  private let signingKey: Data?
+
+  public let maxTransactSize: UInt32
+  public let maxReadSize: UInt32
+  public let maxWriteSize: UInt32
 
   public nonisolated var server: String { connection.host }
-  public private(set) var connectedTree: String?
 
   private let connection: Connection
 
-  public convenience init(host: String) {
-    self.init(Connection(host: host))
-  }
-
-  public convenience init(host: String, port: Int) {
-    self.init(Connection(host: host, port: port))
-  }
-
-  private init(_ connection: Connection) {
-    self.connection = connection
-  }
-
-  func newSession() -> Session {
-    let session = Session(connection)
-
-    session.messageId = messageId
-    session.sessionId = sessionId
-    session.treeId = 0
-
-    session.signingRequired = signingRequired
-    session.signingKey = signingKey
-
-    session.maxTransactSize = maxTransactSize
-    session.maxReadSize = maxReadSize
-    session.maxWriteSize = maxWriteSize
-
-    return session
-  }
-
-  func treeAccessor(share: String) -> TreeAccessor {
-    TreeAccessor(session: self, share: share)
-  }
-
-  public func connect() async throws {
-    try await connection.connect()
-  }
-
-  public func disconnect() {
-    connection.disconnect()
-  }
-
-  @discardableResult
-  public func negotiate(
+  public init(
+    host: String,
+    port: Int = 445,
+    username: String? = nil,
+    password: String? = nil,
+    domain: String? = nil,
+    workstation: String? = nil,
     securityMode: Negotiate.SecurityMode = [.signingEnabled],
-    dialects: [Negotiate.Dialects] = [.smb202, .smb210]
-  ) async throws -> Negotiate.Response {
-    let request = Negotiate.Request(
+    dialects: [Negotiate.Dialects] = [.smb202, .smb210],
+    requireSigning: Bool = false
+  ) async throws {
+    self.connection = Connection(host: host, port: port)
+    self.messageId = makeSequenceNumber()
+
+    // Connect to server
+    try await connection.connect()
+
+    // Negotiate
+    let negotiateRequest = Negotiate.Request(
       messageId: messageId.next(),
       securityMode: securityMode,
       dialects: dialects
     )
+    let negotiateResponse = try await Self.sendInitial(
+      connection: connection, request: negotiateRequest)
 
-    let response = try await send(request)
-
-    signingRequired =
-      response.securityMode.contains(.signingRequired)
+    let computedSigningRequired =
+      negotiateResponse.securityMode.contains(.signingRequired)
       || (securityMode.contains(.signingRequired)
-        && response.securityMode.contains(.signingEnabled))
+        && negotiateResponse.securityMode.contains(.signingEnabled))
 
-    maxTransactSize = response.maxTransactSize
-    maxReadSize = response.maxReadSize
-    maxWriteSize = response.maxWriteSize
+    self.maxTransactSize = negotiateResponse.maxTransactSize
+    self.maxReadSize = negotiateResponse.maxReadSize
+    self.maxWriteSize = negotiateResponse.maxWriteSize
 
-    return response
-  }
-
-  @discardableResult
-  public func sessionSetup(
-    username: String?,
-    password: String?,
-    domain: String? = nil,
-    workstation: String? = nil,
-    requireSigning: Bool = false
-  ) async throws -> SessionSetup.Response {
+    // Session Setup
     let negotiateMessage = NTLM.NegotiateMessage(
       domainName: domain,
       workstationName: workstation
     )
     let securityBuffer = negotiateMessage.encoded()
 
-    let request = SessionSetup.Request(
+    let setupRequest1 = SessionSetup.Request(
       messageId: messageId.next(),
       sessionId: 0,
       securityMode: [requireSigning ? .signingRequired : .signingEnabled],
@@ -110,10 +75,10 @@ public class Session {
       previousSessionId: 0,
       securityBuffer: securityBuffer
     )
-    let response = try await send(request)
+    let setupResponse1 = try await Self.sendInitial(connection: connection, request: setupRequest1)
 
-    if NTStatus(response.header.status) == .moreProcessingRequired {
-      let challengeMessage = NTLM.ChallengeMessage(data: response.buffer)
+    if NTStatus(setupResponse1.header.status) == .moreProcessingRequired {
+      let challengeMessage = NTLM.ChallengeMessage(data: setupResponse1.buffer)
 
       let signingKey = Crypto.randomBytes(count: 16)
       let authenticateMessage = challengeMessage.authenticateMessage(
@@ -125,41 +90,46 @@ public class Session {
         signingKey: signingKey
       )
 
-      let request = SessionSetup.Request(
+      let setupRequest2 = SessionSetup.Request(
         messageId: messageId.next(),
-        sessionId: response.header.sessionId,
+        sessionId: setupResponse1.header.sessionId,
         securityMode: [.signingEnabled],
         capabilities: [],
         previousSessionId: 0,
         securityBuffer: authenticateMessage.encoded()
       )
 
-      let response = try await send(request)
+      let setupResponse2 = try await Self.sendInitial(
+        connection: connection, request: setupRequest2)
 
-      sessionId = response.header.sessionId
-
-      isAnonymous = (username ?? "").isEmpty && (password ?? "").isEmpty
+      self.sessionId = setupResponse2.header.sessionId
+      self.isAnonymous = (username ?? "").isEmpty && (password ?? "").isEmpty
       self.signingKey = signingKey
-
-      return response
+      self.signingRequired = computedSigningRequired
     } else {
-      sessionId = response.header.sessionId
-      return response
+      self.sessionId = setupResponse1.header.sessionId
+      self.isAnonymous = false
+      self.signingKey = nil
+      self.signingRequired = computedSigningRequired
     }
   }
 
-  @discardableResult
-  public func logoff() async throws -> Logoff.Response {
-    let request = Logoff.Request(
-      messageId: messageId.next(),
-      sessionId: sessionId
-    )
-
-    let response = try await send(request)
-
-    sessionId = 0
-
+  private static func sendInitial<Request: Message.Request>(
+    connection: Connection,
+    request: Request
+  ) async throws -> Request.Response {
+    let packet = request.encoded()
+    let data = try await connection.send(packet)
+    let response = Request.Response(data: data)
     return response
+  }
+
+  func treeAccessor(share: String) -> TreeAccessor {
+    TreeAccessor(session: self, share: share)
+  }
+
+  public func disconnect() {
+    connection.disconnect()
   }
 
   public func enumShareAll() async throws -> [Share] {
@@ -763,7 +733,7 @@ public class Session {
   }
 }
 
-private protocol SequenceNumberProtocol {
+private protocol SequenceNumberProtocol: Sendable {
   func next(count: UInt64) -> UInt64
 }
 
@@ -775,7 +745,7 @@ extension SequenceNumberProtocol {
 
 #if canImport(Synchronization)
   @available(macOS 15.0, iOS 18.0, *)
-  private class AtomicSequenceNumber: SequenceNumberProtocol {
+  private final class AtomicSequenceNumber: SequenceNumberProtocol {
     private let current = Atomic<UInt64>(0)
 
     func next(count: UInt64 = 1) -> UInt64 {
@@ -785,7 +755,7 @@ extension SequenceNumberProtocol {
   }
 #endif
 
-private class LegacySequenceNumber: SequenceNumberProtocol {
+private final class LegacySequenceNumber: SequenceNumberProtocol, @unchecked Sendable {
   private var current: UInt64 = 0
   private let queue = DispatchQueue(label: "sequence.number.queue")
 

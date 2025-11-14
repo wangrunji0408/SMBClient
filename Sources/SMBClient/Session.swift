@@ -1,7 +1,11 @@
 import Foundation
 
+#if canImport(Synchronization)
+  import Synchronization
+#endif
+
 public class Session {
-  private var messageId = SequenceNumber<UInt64>()
+  private var messageId = makeSequenceNumber()
   private var sessionId: UInt64 = 0
   private(set) var treeId: UInt32 = 0
 
@@ -766,17 +770,48 @@ public class Session {
   }
 }
 
-private class SequenceNumber<I: UnsignedInteger & FixedWidthInteger> {
-  private var current: I = 0
+private protocol SequenceNumberProtocol {
+  func next(count: UInt64) -> UInt64
+}
+
+extension SequenceNumberProtocol {
+  func next() -> UInt64 {
+    next(count: 1)
+  }
+}
+
+#if canImport(Synchronization)
+  @available(macOS 15.0, iOS 18.0, *)
+  private class AtomicSequenceNumber: SequenceNumberProtocol {
+    private let current = Atomic<UInt64>(0)
+
+    func next(count: UInt64 = 1) -> UInt64 {
+      let (value, _) = current.add(count, ordering: .relaxed)
+      return value
+    }
+  }
+#endif
+
+private class LegacySequenceNumber: SequenceNumberProtocol {
+  private var current: UInt64 = 0
   private let queue = DispatchQueue(label: "sequence.number.queue")
 
-  func next(count: I = 1) -> I {
+  func next(count: UInt64 = 1) -> UInt64 {
     return queue.sync {
       let next = current
       current &+= count
       return next
     }
   }
+}
+
+private func makeSequenceNumber() -> SequenceNumberProtocol {
+  #if canImport(Synchronization)
+    if #available(macOS 15.0, iOS 18.0, *) {
+      return AtomicSequenceNumber()
+    }
+  #endif
+  return LegacySequenceNumber()
 }
 
 private func creditSize(size: UInt32) -> UInt16 {

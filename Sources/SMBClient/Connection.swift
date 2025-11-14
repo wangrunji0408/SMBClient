@@ -1,20 +1,15 @@
 import Foundation
 import Network
 
-public class Connection {
-  let host: String
-  var onDisconnected: (Error) -> Void
+public actor Connection {
+  public let host: String
 
   private let connection: NWConnection
 
   // Track pending requests by message ID
   private var pendingRequests: [UInt64: CheckedContinuation<Data, Error>] = [:]
-  private let requestsLock = NSLock()
 
-  // Flag to track if receive loop is running
-  private var isReceiving = false
-
-  public var state: NWConnection.State {
+  public nonisolated var state: NWConnection.State {
     connection.state
   }
 
@@ -25,51 +20,38 @@ public class Connection {
       port: NWEndpoint.Port(rawValue: UInt16(port))!
     )
     connection = NWConnection(to: endpoint, using: .tcp)
-    onDisconnected = { _ in }
   }
 
   public func connect() async throws {
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-      connection.stateUpdateHandler = { (state) in
+      connection.stateUpdateHandler = { [weak self] (state) in
         switch state {
         case .setup, .preparing:
           break
         case .waiting(let error):
           continuation.resume(throwing: error)
-          self.connection.stateUpdateHandler = nil
+          self?.connection.stateUpdateHandler = nil
         case .ready:
+          Task {
+            await self?.receiveLoop()
+          }
           continuation.resume()
-          self.connection.stateUpdateHandler = stateUpdateHandler
-          // Start continuous receive loop
-          self.startReceiveLoop()
+          self?.connection.stateUpdateHandler = nil
         case .failed(let error):
           continuation.resume(throwing: error)
-          self.connection.stateUpdateHandler = nil
+          self?.connection.stateUpdateHandler = nil
         case .cancelled:
           continuation.resume(throwing: ConnectionError.cancelled)
-          self.connection.stateUpdateHandler = nil
+          self?.connection.stateUpdateHandler = nil
         @unknown default:
           break
         }
       }
-
       connection.start(queue: .global(qos: .userInitiated))
-    }
-
-    @Sendable
-    func stateUpdateHandler(_ state: NWConnection.State) {
-      switch state {
-      case .waiting(let error), .failed(let error):
-        onDisconnected(error)
-      case .setup, .preparing, .ready, .cancelled:
-        break
-      @unknown default:
-        break
-      }
     }
   }
 
-  public func disconnect() {
+  public nonisolated func disconnect() {
     connection.cancel()
   }
 
@@ -78,11 +60,9 @@ public class Connection {
     case .setup:
       try await connect()
     case .waiting(let error), .failed(let error):
-      onDisconnected(error)
       throw error
     case .preparing, .ready:
-      // Ensure receive loop is running
-      startReceiveLoop()
+      break
     case .cancelled:
       throw ConnectionError.cancelled
     @unknown default:
@@ -99,36 +79,20 @@ public class Connection {
 
     return try await withCheckedThrowingContinuation { (continuation) in
       // Register the pending request
-      requestsLock.lock()
       pendingRequests[messageId] = continuation
-      requestsLock.unlock()
 
       connection.send(
         content: content,
-        completion: .contentProcessed { (error) in
+        completion: .contentProcessed { [weak self] (error) in
           if let error {
             // Remove pending request and resume with error
-            self.requestsLock.lock()
-            let cont = self.pendingRequests.removeValue(forKey: messageId)
-            self.requestsLock.unlock()
-            cont?.resume(throwing: error)
+            Task {
+              let cont = await self?.removePendingRequest(messageId: messageId)
+              cont?.resume(throwing: error)
+            }
           }
           // If send succeeds, the response will be handled by the receive loop
         })
-    }
-  }
-
-  private func startReceiveLoop() {
-    requestsLock.lock()
-    guard !isReceiving else {
-      requestsLock.unlock()
-      return
-    }
-    isReceiving = true
-    requestsLock.unlock()
-
-    Task {
-      await receiveLoop()
     }
   }
 
@@ -200,9 +164,7 @@ public class Connection {
   }
 
   private func dispatchResponse(messageId: UInt64, result: Result<Data, Error>) {
-    requestsLock.lock()
     let continuation = pendingRequests.removeValue(forKey: messageId)
-    requestsLock.unlock()
 
     if let continuation = continuation {
       switch result {
@@ -215,15 +177,16 @@ public class Connection {
   }
 
   private func failAllPendingRequests(with error: Error) {
-    requestsLock.lock()
     let requests = pendingRequests
     pendingRequests.removeAll()
-    isReceiving = false
-    requestsLock.unlock()
 
     for (_, continuation) in requests {
       continuation.resume(throwing: error)
     }
+  }
+
+  private func removePendingRequest(messageId: UInt64) -> CheckedContinuation<Data, Error>? {
+    return pendingRequests.removeValue(forKey: messageId)
   }
 
 }

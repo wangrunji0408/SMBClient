@@ -7,24 +7,16 @@ public class SMBClient {
 
   public let session: Session
 
-  public var onDisconnected: (Error) -> Void {
-    didSet {
-      session.onDisconnected = onDisconnected
-    }
-  }
-
   public init(host: String) {
     self.host = host
     port = 445
     session = Session(host: host)
-    onDisconnected = { _ in }
   }
 
   public init(host: String, port: Int) {
     self.host = host
     self.port = port
     session = Session(host: host, port: port)
-    onDisconnected = { _ in }
   }
 
   @discardableResult

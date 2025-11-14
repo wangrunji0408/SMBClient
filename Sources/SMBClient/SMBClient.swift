@@ -4,6 +4,7 @@ public final class SMBClient: Sendable {
   public let host: String
   public let port: Int
   public var share: String? { session.connectedTree }
+  public var isDisconnected: Bool { session.isDisconnected }
 
   let session: Session
 

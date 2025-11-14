@@ -22,6 +22,7 @@ public final class Session: Sendable {
   public let maxWriteSize: UInt32
 
   public nonisolated var server: String { connection.host }
+  public nonisolated var isDisconnected: Bool { connection.state != .ready }
 
   private let connection: Connection
 

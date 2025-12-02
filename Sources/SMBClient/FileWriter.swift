@@ -5,10 +5,23 @@ public class FileWriter {
   private let path: String
 
   private var createResponse: Create.Response?
+  private var writeOffset: UInt64 = 0
 
   init(session: Session, path: String) {
     self.session = session
     self.path = path.precomposedStringWithCanonicalMapping
+  }
+
+  public func write(data: Data) async throws {
+    let fileProxy = try await fileProxy()
+
+    _ = try await session.write(
+      data: data,
+      fileId: fileProxy.id,
+      offset: writeOffset
+    )
+
+    writeOffset += UInt64(data.count)
   }
 
   public func upload(data: Data) async throws {
@@ -126,6 +139,21 @@ public class FileWriter {
     createResponse = nil
   }
 
+  public func setFileTimestamps(creationDate: Date, lastAccessDate: Date, modificationDate: Date) async throws {
+    let fileProxy = try await fileProxy()
+
+    try await session.setInfo(
+      fileId: fileProxy.id,
+      FileBasicInformation(
+        creationTime: FileTime(creationDate).raw,
+        lastAccessTime: FileTime(lastAccessDate).raw,
+        lastWriteTime: FileTime(modificationDate).raw,
+        changeTime: 0,
+        fileAttributes: [.archive]
+      )
+    )
+  }
+
   func restoreFileAttributes(_ fileHandle: FileHandle, _ destination: String) async {
     var stat = stat()
 
@@ -178,6 +206,7 @@ public class FileWriter {
           .writeData,
           .appendData,
           .readAttributes,
+          .writeAttributes,
           .readControl,
           .writeDac
         ],

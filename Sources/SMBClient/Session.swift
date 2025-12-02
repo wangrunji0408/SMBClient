@@ -600,6 +600,21 @@ public final class Session: Sendable {
   }
 
   @discardableResult
+  public func setInfo(fileId: Data, _ info: FileInformationClass) async throws -> SetInfo.Response {
+    let request = SetInfo.Request(
+      messageId: messageId.next(),
+      treeId: treeId,
+      sessionId: sessionId,
+      fileId: fileId,
+      infoType: .file,
+      fileInformation: info
+    )
+
+    let response: SetInfo.Response = try await send(request)
+    return response
+  }
+
+  @discardableResult
   public func flush(fileId: Data) async throws -> Flush.Response {
     let request = Flush.Request(
       messageId: messageId.next(),

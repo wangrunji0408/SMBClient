@@ -139,6 +139,15 @@ public class FileWriter {
     createResponse = nil
   }
 
+  public func move(to newPath: String) async throws {
+    let fileProxy = try await fileProxy()
+
+    try await session.setInfo(
+      fileId: fileProxy.id,
+      FileRenameInformation(fileName: newPath.precomposedStringWithCanonicalMapping)
+    )
+  }
+
   public func setFileTimestamps(creationDate: Date, lastAccessDate: Date, modificationDate: Date) async throws {
     let fileProxy = try await fileProxy()
 

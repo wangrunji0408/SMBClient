@@ -68,6 +68,10 @@ public final class SMBClient: Sendable {
     return files.map { File(fileInfo: $0) }
   }
 
+  public func listDirectoryStream(path: String, pattern: String = "*", onBatch: @escaping ([File]) -> Void) async throws {
+    try await session.queryDirectoryStream(path: Pathname.normalize(path), pattern: pattern, onBatch: onBatch)
+  }
+
   public func createDirectory(path: String) async throws {
     try await session.createDirectory(
       path: Pathname.normalize(path.precomposedStringWithCanonicalMapping))

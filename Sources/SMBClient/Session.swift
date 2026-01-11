@@ -354,6 +354,77 @@ public final class Session: Sendable {
     return files
   }
 
+  public func queryDirectoryStream(path: String, pattern: String, onBatch: @escaping ([File]) -> Void) async throws {
+    let createRequest = Create.Request(
+      messageId: messageId.next(),
+      treeId: treeId,
+      sessionId: sessionId,
+      desiredAccess: [.readData, .readAttributes, .synchronize],
+      fileAttributes: [.directory],
+      shareAccess: [.read, .write, .delete],
+      createDisposition: .open,
+      createOptions: [.directoryFile],
+      name: path
+    )
+
+    let outputBufferLength = min(1_048_576, maxTransactSize)
+    let creditSize = creditSize(size: outputBufferLength)
+    let fileInformationClass = QueryDirectory.FileInformationClass.fileDirectoryInformation
+
+    let queryDirectoryRequest = QueryDirectory.Request(
+      creditCharge: creditSize,
+      headerFlags: [.relatedOperations],
+      messageId: messageId.next(count: UInt64(creditSize)),
+      treeId: treeId,
+      sessionId: sessionId,
+      fileInformationClass: fileInformationClass,
+      fileId: temporaryUUID,
+      fileName: pattern,
+      outputBufferLength: outputBufferLength
+    )
+
+    let (createResponse, queryDirectoryResponse) = try await send(
+      createRequest, queryDirectoryRequest)
+
+    // Send first batch
+    let firstBatch = queryDirectoryResponse.files().map { File(fileInfo: $0) }
+    if !firstBatch.isEmpty {
+      onBatch(firstBatch)
+    }
+
+    // Continue fetching if there are more files
+    if NTStatus(createResponse.header.status) != .noMoreFiles {
+      repeat {
+        let fileId = createResponse.fileId
+
+        let queryDirectoryRequest = QueryDirectory.Request(
+          creditCharge: creditSize,
+          messageId: messageId.next(count: UInt64(creditSize)),
+          treeId: treeId,
+          sessionId: sessionId,
+          fileInformationClass: fileInformationClass,
+          flags: [],
+          fileId: fileId,
+          fileName: pattern,
+          outputBufferLength: outputBufferLength
+        )
+
+        let queryDirectoryResponse = try await send(queryDirectoryRequest)
+        let batch = queryDirectoryResponse.files().map { File(fileInfo: $0) }
+
+        if !batch.isEmpty {
+          onBatch(batch)
+        }
+
+        if NTStatus(queryDirectoryResponse.header.status) == .noMoreFiles {
+          break
+        }
+      } while true
+    }
+
+    try await close(fileId: createResponse.fileId)
+  }
+
   public func fileStat(path: String) async throws -> Create.Response {
     let createRequest = Create.Request(
       messageId: messageId.next(),
